@@ -1,0 +1,23 @@
+# Build output
+/target/
+
+# Local data and logs
+/data/
+*.log
+
+# other files
+*works.rs
+
+# Editor/OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Rust backup files
+**/*.rs.bk
+
+# Env files
+.env
+.env.*
+

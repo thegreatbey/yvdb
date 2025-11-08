@@ -1,0 +1,28 @@
+[package]
+name = "yvdb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros", "http1", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+anyhow = "1"
+tower = { version = "0.5", features = ["timeout"] }
+
+ 
+
+[dev-dependencies]
+# tower provides ServiceExt::oneshot for testing routers without binding sockets
+tower = { version = "0.5", features = ["util"] }
+# collects HTTP response bodies in tests
+http-body-util = "0.1"
+# temporary files/directories for isolated WAL paths
+tempfile = "3"
+
+ 
+
