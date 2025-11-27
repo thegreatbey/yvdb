@@ -291,6 +291,7 @@ mod tests {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(&path)
             .unwrap();
         let up = serde_json::json!({
@@ -303,8 +304,8 @@ mod tests {
             "collection": "demo",
             "id": "id1"
         });
-        writeln!(&mut f, "{}", up.to_string()).unwrap();
-        writeln!(&mut f, "{}", del.to_string()).unwrap();
+        writeln!(&mut f, "{}", up).unwrap();
+        writeln!(&mut f, "{}", del).unwrap();
 
         //now open wal and replay; it should read the same file
         let wal = Wal::open(&path).unwrap();
