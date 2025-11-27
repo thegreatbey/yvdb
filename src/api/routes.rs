@@ -207,9 +207,7 @@ pub async fn stats_handler(
 
 //list all collections with basic statistics so clients can discover available datasets
 #[instrument(level = "info", skip_all)]
-pub async fn collections_handler(
-    State(state): State<AppState>,
-) -> Json<Vec<StatsResponse>> {
+pub async fn collections_handler(State(state): State<AppState>) -> Json<Vec<StatsResponse>> {
     let store = state.store.clone();
     let list = store.list_all_stats();
     let out: Vec<StatsResponse> = list
