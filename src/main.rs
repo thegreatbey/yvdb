@@ -2,14 +2,13 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::http::StatusCode;
 use axum::{
-    error_handling::HandleErrorLayer,
-    middleware,
-    extract::DefaultBodyLimit,
     body::Body as AxumBody,
+    error_handling::HandleErrorLayer,
+    extract::DefaultBodyLimit,
+    middleware,
     response::Response,
-    Json,
     routing::{delete, get, head, post},
-    Router,
+    Json, Router,
 };
 use std::time::Duration;
 use tower::timeout::TimeoutLayer;
@@ -22,6 +21,7 @@ mod config;
 mod persist;
 mod store;
 
+use crate::api::types::ErrorResponse;
 use api::routes::{delete_handler, query_handler, stats_handler, upsert_handler};
 use config::Config;
 use persist::{
@@ -29,7 +29,6 @@ use persist::{
     wal::Wal,
 };
 use store::Store;
-use crate::api::types::ErrorResponse;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -59,6 +58,21 @@ async fn version() -> Json<serde_json::Value> {
     }))
 }
 
+//index route returns a short banner with useful links so new users can discover endpoints fast
+async fn index() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "endpoints": {
+            "health": "/healthz",
+            "version": "/version",
+            "upsert": "/collections/:name/upsert",
+            "query": "/collections/:name/query",
+            "stats": "/collections/:name/stats"
+        }
+    }))
+}
+
 //uniform JSON 404 for unknown routes; keeps clients from seeing plain-text errors
 async fn not_found(uri: axum::http::Uri) -> (StatusCode, Json<ErrorResponse>) {
     (
@@ -75,7 +89,11 @@ async fn main() -> anyhow::Result<()> {
     //logs with level from RUST_LOG env or default to info
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt().with_env_filter(env_filter).init();
-    tracing::info!(name = env!("CARGO_PKG_NAME"), version = env!("CARGO_PKG_VERSION"), "starting up");
+    tracing::info!(
+        name = env!("CARGO_PKG_NAME"),
+        version = env!("CARGO_PKG_VERSION"),
+        "starting up"
+    );
 
     //config and data directory
     let config = Arc::new(Config::from_env());
@@ -103,11 +121,19 @@ async fn main() -> anyhow::Result<()> {
     let max_request_bytes = config.max_request_bytes;
     let request_timeout_ms = config.request_timeout_ms;
     let snapshot_on_shutdown = config.snapshot_on_shutdown;
+    //server bind address may be changed via env for container or remote deployment
+    let bind_addr = config.bind_addr.clone();
+    //keep only N snapshots based on config so disk usage stays predictable
+    let snapshot_retention = config.snapshot_retention;
     let state = AppState { store, wal, config };
     let app = Router::new()
         .route("/collections/:name/upsert", post(upsert_handler))
         .route("/collections/:name/query", post(query_handler))
         .route("/collections/:name/stats", get(stats_handler))
+        //list all collections for discovery
+        .route("/collections", get(api::routes::collections_handler))
+        //discovery-friendly index
+        .route("/", get(index))
         .route("/collections/:name/records/:id", delete(delete_handler))
         //health check endpoint for quick "are you up?" probes
         .route("/healthz", get(healthz))
@@ -175,15 +201,14 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     //bind and serve
-    let addr: SocketAddr = "127.0.0.1:8080".parse()?;
+    let addr: SocketAddr = bind_addr.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     //background snapshot task saves state periodically to speed up restarts
     let snap_dir_bg = snaps_dir.clone();
     let snap_store_bg = snap_store.clone();
     let ticker_handle = tokio::spawn(async move {
-        //keep only N of recent snapshots to reduce disk usage
-        //in our case, we keep only the last 3 snapshots
-        const SNAPSHOT_RETENTION: usize = 3;
+        //keep only N of recent snapshots to reduce disk usage based on configured retention
+        let retention = snapshot_retention;
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
         loop {
             ticker.tick().await;
@@ -206,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
                                 })
                                 .collect();
                         entries.sort_by_key(|(modified, _)| *modified);
-                        while entries.len() > SNAPSHOT_RETENTION {
+                        while entries.len() > retention {
                             let (_t, path) = entries.remove(0);
                             let _ = std::fs::remove_file(path);
                         }
@@ -230,9 +255,9 @@ async fn main() -> anyhow::Result<()> {
         match write_snapshot(&snap_store, &snaps_dir) {
             Ok(path) => tracing::info!("Final snapshot written in ({})", path.display()),
             Err(e) => tracing::warn!("final snapshot failed: {}", e),
-            }
         }
-        tracing::info!("Shutdown complete.");
+    }
+    tracing::info!("Shutdown complete.");
     Ok(())
 }
 
@@ -281,10 +306,12 @@ mod integration_tests {
             max_batch: 100,
             max_k: 10,
             snapshot_interval_secs: 60,
+            snapshot_retention: 3,
             wal_rotate_max_bytes: 0,
             request_timeout_ms: 2000,
             max_request_bytes: 1_048_576,
             snapshot_on_shutdown: false,
+            bind_addr: "127.0.0.1:8080".to_string(),
         });
 
         let state = AppState { store, wal, config };

@@ -205,6 +205,25 @@ pub async fn stats_handler(
     }))
 }
 
+//list all collections with basic statistics so clients can discover available datasets
+#[instrument(level = "info", skip_all)]
+pub async fn collections_handler(
+    State(state): State<AppState>,
+) -> Json<Vec<StatsResponse>> {
+    let store = state.store.clone();
+    let list = store.list_all_stats();
+    let out: Vec<StatsResponse> = list
+        .into_iter()
+        .map(|(name, s)| StatsResponse {
+            collection: name,
+            count: s.count,
+            dimension: s.dimension,
+            metric: s.metric,
+        })
+        .collect();
+    Json(out)
+}
+
 fn internal_error(err: anyhow::Error) -> (axum::http::StatusCode, Json<ErrorResponse>) {
     (
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,

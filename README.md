@@ -8,9 +8,14 @@ Small, educational vector database: single-node, in-memory store with append-onl
 # Windows PowerShell
 # from repo root
 $env:RUST_LOG="info"; cargo run
+
+# Change bind address/port if needed (e.g., different port or LAN bind)
+$env:YVDB_BIND_ADDR="127.0.0.1:8080"; cargo run
+# For LAN access (will trigger Windows firewall prompt)
+# $env:YVDB_BIND_ADDR="0.0.0.0:8080"; cargo run
 ```
 
-Server listens on `127.0.0.1:8080`.
+Server listens on `127.0.0.1:8080` by default (configurable via `YVDB_BIND_ADDR`).
 
 ## HTTP API
 
@@ -87,6 +92,33 @@ Response
 ```
 Idempotent: returns `{"deleted": false}` if the record was already absent.
 
+## Windows: sending JSON reliably
+
+When posting JSON from PowerShell, prefer sending a file to avoid quoting/encoding issues:
+
+```powershell
+$json = @'
+{
+  "records": [
+    {"id": "a", "vector": [1.0, 0.0, 0.0]},
+    {"id": "b", "vector": [0.0, 1.0, 0.0]}
+  ],
+  "dimension": 3,
+  "metric": "cosine"
+}
+'@
+
+# Write UTF-8 without BOM so the server reads clean JSON bytes
+[System.IO.File]::WriteAllText("body.json", $json, (New-Object System.Text.UTF8Encoding($false)))
+$abs = (Resolve-Path .\body.json).Path
+
+# Using curl.exe and a file body (recommended)
+curl.exe -X POST -H "Content-Type: application/json" --data-binary "@$abs" http://127.0.0.1:8080/collections/demo/upsert
+
+# Or PowerShell's native client
+Invoke-WebRequest -Uri http://127.0.0.1:8080/collections/demo/upsert -Method Post -ContentType "application/json" -InFile $abs
+```
+
 ## Data & Durability
 
 - WAL file at `data/wal.log` (JSON Lines). On startup, the server replays the log.
@@ -118,4 +150,6 @@ Scoring semantics
 - `YVDB_MAX_K` (default: `1000`) — max `k` per query.
 - `YVDB_SNAPSHOT_INTERVAL_SECS` (default: `30`) — snapshot frequency.
 - `YVDB_WAL_ROTATE_MAX_BYTES` (default: `0`) — rotate WAL when size exceeds this (0 disables).
+- `YVDB_SNAPSHOT_RETENTION` (default: `3`) — number of snapshots to keep on disk.
+- `YVDB_BIND_ADDR` (default: `127.0.0.1:8080`) — server bind address (use `0.0.0.0:8080` for LAN).
 

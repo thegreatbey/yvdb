@@ -90,6 +90,23 @@ impl Store {
         }
     }
 
+    //returns all collections with basic statistics for discovery and UI listings
+    pub fn list_all_stats(&self) -> Vec<(String, Stats)> {
+        let guard = self.collections.read().unwrap();
+        let mut out = Vec::with_capacity(guard.len());
+        for (name, c) in guard.iter() {
+            out.push((
+                name.clone(),
+                Stats {
+                    count: c.ids.len(),
+                    dimension: c.dimension,
+                    metric: c.metric.as_str().to_string(),
+                },
+            ));
+        }
+        out
+    }
+
     //get current config for a collection
     pub fn get_or_create_collection_config(&self, name: &str) -> Option<(usize, Metric)> {
         let guard = self.collections.read().unwrap();
