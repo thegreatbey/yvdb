@@ -8,8 +8,8 @@ use tracing::instrument;
 
 use crate::{
     api::types::{
-        DeleteResponse, ErrorResponse, QueryFilter, QueryRequest, QueryResponse, StatsResponse,
-        UpsertRequest, UpsertResponse,
+        DeleteResponse, ErrorResponse, QueryFilter, QueryRequest, QueryResponse, ScoredPoint,
+        StatsResponse, UpsertRequest, UpsertResponse,
     },
     store::{Metric, Store},
     AppState,
@@ -135,10 +135,16 @@ pub async fn query_handler(
         ));
     }
 
-    /*if a filter is provided, score all vectors and apply the filter
-    keep only those whose metadata has key == value, and returns the first k.
-    otherwise, use the top_k function to get the top k results*/
-    let mut results = if let Some(ref filter) = payload.filter {
+    //capture requested cutoff and potential relaxed fallback
+    let requested_min = payload
+        .min_score
+        .unwrap_or(state.config.default_min_score)
+        .max(f32::MIN);
+    let mut applied_min = requested_min;
+    let mut relaxed = false;
+
+    //collect candidate results
+    let base_results = if let Some(ref filter) = payload.filter {
         let all = store
             .score_all_sorted(&name, &payload.vector)
             .map_err(|e| {
@@ -173,14 +179,57 @@ pub async fn query_handler(
                 )
             })?
     };
+
+    let mut filtered = apply_min_score(&base_results, applied_min);
+
+    if filtered.is_empty() {
+        let relaxed_min = (requested_min - state.config.relax_delta).max(state.config.relax_floor);
+        if relaxed_min < requested_min {
+            applied_min = relaxed_min;
+            relaxed = true;
+            filtered = apply_min_score(&base_results, applied_min);
+        }
+    }
+
+    let mut warning = None;
+    if filtered.is_empty() && relaxed {
+        warning = Some(format!(
+            "Threshold relaxed from {:.2} to {:.2} but no results met the cutoff",
+            requested_min, applied_min
+        ));
+    } else if relaxed {
+        warning = Some(format!(
+            "Threshold relaxed from {:.2} to {:.2} to return lower-confidence matches",
+            requested_min, applied_min
+        ));
+    }
+
+    //attach distance and per-result flags
     if payload.return_distance {
         if let Metric::L2 = metric {
-            for r in &mut results {
+            for r in &mut filtered {
                 r.distance = Some(-r.score);
             }
         }
     }
-    Ok(Json(QueryResponse { results }))
+    for r in &mut filtered {
+        r.applied_min_score = applied_min;
+        r.relaxed = relaxed;
+    }
+
+    //update query stats after final decision
+    {
+        let mut guard = state.query_stats.write().unwrap();
+        guard.total += 1;
+        if !filtered.is_empty() {
+            guard.success += 1;
+        }
+    }
+
+    Ok(Json(QueryResponse {
+        results: filtered,
+        warning,
+    }))
 }
 
 //collection stats for visibility
@@ -261,6 +310,16 @@ fn metadata_matches_filter(meta: &Option<serde_json::Value>, filter: &QueryFilte
     false
 }
 
+fn apply_min_score(results: &[ScoredPoint], min_score: f32) -> Vec<ScoredPoint> {
+    let mut out = Vec::new();
+    for r in results.iter() {
+        if r.score >= min_score {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
 //delete a record; idempotent: returns deleted=false when the record was not present
 #[instrument(level = "info", skip_all, fields(collection = %name, id = %id))]
 pub async fn delete_handler(
@@ -288,7 +347,11 @@ pub async fn delete_handler(
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::PathBuf,
+        sync::{Arc, RwLock},
+        time::Instant,
+    };
 
     use axum::{
         body::Body,
@@ -323,6 +386,8 @@ mod tests {
             store: store.clone(),
             wal: wal.clone(),
             config: config.clone(),
+            query_stats: Arc::new(std::sync::RwLock::new(crate::QueryStats::default())),
+            start_time: std::time::Instant::now(),
         };
 
         //build a router identical to main
@@ -373,6 +438,7 @@ mod tests {
             k: 2,
             filter: None,
             return_distance: false,
+            min_score: None,
         })
         .unwrap();
         let res = app
@@ -422,6 +488,8 @@ mod tests {
             store: store.clone(),
             wal: wal.clone(),
             config: config.clone(),
+            query_stats: Arc::new(RwLock::new(crate::QueryStats::default())),
+            start_time: Instant::now(),
         };
 
         let app = Router::new()
@@ -459,6 +527,7 @@ mod tests {
             k: 0,
             filter: None,
             return_distance: false,
+            min_score: None,
         })
         .unwrap();
         let res = app
@@ -492,6 +561,8 @@ mod tests {
             store: store.clone(),
             wal: wal.clone(),
             config: config.clone(),
+            query_stats: Arc::new(RwLock::new(crate::QueryStats::default())),
+            start_time: Instant::now(),
         };
 
         let app = Router::new()
@@ -529,6 +600,7 @@ mod tests {
             k: 10,
             filter: None,
             return_distance: false,
+            min_score: None,
         })
         .unwrap();
         let res = app
@@ -562,6 +634,8 @@ mod tests {
             store: store.clone(),
             wal: wal.clone(),
             config: config.clone(),
+            query_stats: Arc::new(RwLock::new(crate::QueryStats::default())),
+            start_time: Instant::now(),
         };
 
         let app = Router::new()
@@ -637,6 +711,7 @@ mod tests {
             k: 1,
             filter: None,
             return_distance: false,
+            min_score: None,
         })
         .unwrap();
         let res = app
@@ -669,6 +744,8 @@ mod tests {
             store: store.clone(),
             wal: wal.clone(),
             config: config.clone(),
+            query_stats: Arc::new(RwLock::new(crate::QueryStats::default())),
+            start_time: Instant::now(),
         };
 
         let app = Router::new()
@@ -717,6 +794,7 @@ mod tests {
                 range: None,
             }),
             return_distance: false,
+            min_score: None,
         })
         .unwrap();
         let res = app
@@ -750,6 +828,8 @@ mod tests {
             store: store.clone(),
             wal: wal.clone(),
             config: config.clone(),
+            query_stats: Arc::new(RwLock::new(crate::QueryStats::default())),
+            start_time: Instant::now(),
         };
 
         let app = Router::new()
@@ -806,6 +886,7 @@ mod tests {
                 }),
             }),
             return_distance: false,
+            min_score: None,
         })
         .unwrap();
         let res = app

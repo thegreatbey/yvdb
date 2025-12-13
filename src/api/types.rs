@@ -33,6 +33,8 @@ pub struct QueryRequest {
     pub filter: Option<QueryFilter>,
     #[serde(default)]
     pub return_distance: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,11 +45,17 @@ pub struct ScoredPoint {
     pub metadata: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance: Option<f32>,
+    //records the similarity cutoff applied when this result was returned
+    pub applied_min_score: f32,
+    //marks that the query had to relax its requested cutoff to return results
+    pub relaxed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub results: Vec<ScoredPoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 //simple equality filter on a top-level metadata key

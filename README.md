@@ -1,4 +1,4 @@
-# yvdb (learning vector DB)
+# yvdb (an intro vector DB)
 
 Small, educational vector database: single-node, in-memory store with append-only durability and brute-force top-k search.
 
@@ -71,6 +71,12 @@ Response
 {"results": [{"id":"a", "score":0.99, "metadata": {"tag":"alpha"}}]}
 ```
 
+### Heartbeat (adaptive `min_score`)
+- Queries/searches accept an optional `min_score`; when left otu the server uses `YVDB_DEFAULT_MIN_SCORE` (default `0.0`).
+- IF NO RESULTS meet the cutoff, the SERVER RETRIES ONCE with a lower threshold: it subtracts `YVDB_RELAX_DELTA` (default `0.2`) but never drops below `YVDB_RELAX_FLOOR` (default `0.5`). THIS IS A RELAXATION. Relaxation only happens when the lowered cutoff is below the default requested one.
+- WWHEN THE ABOVE RELAXATION RUNS, the response includes a `warning` string and every result echoes the `applied_min_score` plus a `relaxed` flag. `distance` is still included for L2 when `return_distance` is true.
+- `/healthz` surfaces a running success rate along with the current relaxation floor and default `min_score` so you can monitor whether the heartbeat is engaging.
+
 Errors (uniform shape)
 ```json
 {"code":"bad_request","message":"vector dimension mismatch"}
@@ -124,7 +130,7 @@ Invoke-WebRequest -Uri http://127.0.0.1:8080/collections/demo/upsert -Method Pos
 - WAL file at `data/wal.log` (JSON Lines). On startup, the server replays the log.
 - Snapshots: periodic full snapshots under `data/snapshots/snapshot-<unix>.json` to speed up restart.
 
-## Notes
+## Notes PLEASE READ
 
 - First upsert to a new collection must include `dimension` and `metric`.
 - Limits and timeouts (env overrides):
@@ -142,7 +148,7 @@ Scoring semantics
 - `k == 0` is rejected with 400.
 - `k > count` is allowed; results size is `min(k, count)`.
 
-## Environment variables
+## Env variables
 
 - `YVDB_DATA_DIR` (default: `data`) — folder for WAL/snapshots.
 - `YVDB_MAX_DIMENSION` (default: `4096`) — upper bound for collection dimension.
@@ -152,4 +158,7 @@ Scoring semantics
 - `YVDB_WAL_ROTATE_MAX_BYTES` (default: `0`) — rotate WAL when size exceeds this (0 disables).
 - `YVDB_SNAPSHOT_RETENTION` (default: `3`) — number of snapshots to keep on disk.
 - `YVDB_BIND_ADDR` (default: `127.0.0.1:8080`) — server bind address (use `0.0.0.0:8080` for LAN).
+- `YVDB_DEFAULT_MIN_SCORE` (default: `0.0`) — similarity floor used when a query omits `min_score`.
+- `YVDB_RELAX_DELTA` (default: `0.2`) — how much to lower `min_score` when the first pass returns no results.
+- `YVDB_RELAX_FLOOR` (default: `0.5`) — lowest cutoff allowed during relaxation; acts as a safety net against over-relaxing.
 

@@ -1,16 +1,20 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
 use axum::http::StatusCode;
 use axum::{
     body::Body as AxumBody,
     error_handling::HandleErrorLayer,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, State},
     middleware,
     response::Response,
     routing::{delete, get, head, post},
     Json, Router,
 };
-use std::time::Duration;
 use tower::timeout::TimeoutLayer;
 use tower::BoxError;
 use tower::ServiceBuilder;
@@ -38,11 +42,38 @@ pub struct AppState {
     pub wal: Arc<Wal>,
     //config to control limits
     pub config: Arc<Config>,
+    //counters for query outcomes to surface success rate
+    pub query_stats: Arc<RwLock<QueryStats>>,
+    //server start time to report uptime in health checks
+    pub start_time: Instant,
 }
 
-//quick check that server is running; returns a tiny OK so scripts and load balancers can probe readiness fast
-async fn healthz() -> &'static str {
-    "ok"
+#[derive(Default, Clone)]
+pub struct QueryStats {
+    pub total: usize,
+    pub success: usize,
+}
+
+//liveness + simple stats so operators can see retrieval health
+async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let stats = state.query_stats.read().unwrap().clone();
+    let uptime_secs = state.start_time.elapsed().as_secs();
+    let success_rate = if stats.total == 0 {
+        0.0
+    } else {
+        stats.success as f64 / stats.total as f64
+    };
+    Json(serde_json::json!({
+        "status": "ok",
+        "uptime_secs": uptime_secs,
+        "query_stats": {
+            "total": stats.total,
+            "success": stats.success,
+            "success_rate": success_rate
+        },
+        "current_relax_cutoff": state.config.relax_floor,
+        "default_min_score": state.config.default_min_score
+    }))
 }
 
 //head variant for health checks that want no body; reduces bytes on the wire
@@ -125,7 +156,13 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = config.bind_addr.clone();
     //keep only N snapshots based on config so disk usage stays predictable
     let snapshot_retention = config.snapshot_retention;
-    let state = AppState { store, wal, config };
+    let state = AppState {
+        store,
+        wal,
+        config,
+        query_stats: Arc::new(RwLock::new(QueryStats::default())),
+        start_time: Instant::now(),
+    };
     let app = Router::new()
         .route("/collections/:name/upsert", post(upsert_handler))
         .route("/collections/:name/query", post(query_handler))
@@ -312,9 +349,18 @@ mod integration_tests {
             max_request_bytes: 1_048_576,
             snapshot_on_shutdown: false,
             bind_addr: "127.0.0.1:8080".to_string(),
+            default_min_score: 0.0,
+            relax_floor: 0.5,
+            relax_delta: 0.2,
         });
 
-        let state = AppState { store, wal, config };
+        let state = AppState {
+            store,
+            wal,
+            config,
+            query_stats: Arc::new(std::sync::RwLock::new(QueryStats::default())),
+            start_time: std::time::Instant::now(),
+        };
         let app = Router::new()
             .route("/collections/:name/upsert", post(upsert_handler))
             .route("/collections/:name/query", post(query_handler))

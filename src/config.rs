@@ -12,6 +12,12 @@ pub struct Config {
     pub snapshot_on_shutdown: bool,
     //address and port used by the HTTP server; defaults to localhost:8080 for safety
     pub bind_addr: String,
+    //default similarity floor used when a query does not provide one
+    pub default_min_score: f32,
+    //fallback floor applied when relaxing a failed query
+    pub relax_floor: f32,
+    //amount to subtract from the requested min score when relaxing a failed query
+    pub relax_delta: f32,
 }
 
 impl Config {
@@ -30,6 +36,10 @@ impl Config {
         //allow overriding the listen address for Docker or remote deployment
         let bind_addr =
             std::env::var("YVDB_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+        //score guardrails for adaptive query responses
+        let default_min_score = env_f32("YVDB_DEFAULT_MIN_SCORE", 0.0);
+        let relax_floor = env_f32("YVDB_RELAX_FLOOR", 0.5);
+        let relax_delta = env_f32("YVDB_RELAX_DELTA", 0.2);
         Self {
             data_dir,
             max_dimension,
@@ -42,6 +52,9 @@ impl Config {
             max_request_bytes,
             snapshot_on_shutdown,
             bind_addr,
+            default_min_score,
+            relax_floor,
+            relax_delta,
         }
     }
 }
@@ -69,4 +82,11 @@ fn env_bool(key: &str, default: bool) -> bool {
         },
         Err(_) => default,
     }
+}
+
+fn env_f32(key: &str, default: f32) -> f32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }

@@ -172,6 +172,8 @@ impl Store {
                 score,
                 metadata: c.metadata[idx].clone(),
                 distance: None,
+                applied_min_score: 0.0,
+                relaxed: false,
             });
         }
         Ok(results)
@@ -207,6 +209,8 @@ impl Store {
                 score,
                 metadata: c.metadata[idx].clone(),
                 distance: None,
+                applied_min_score: 0.0,
+                relaxed: false,
             });
         }
         Ok(results)
