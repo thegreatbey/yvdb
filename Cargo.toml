@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/thegreatbey/yvdb/tree/feature/heartbeat"
 readme = "README.md"
 keywords = ["vector-database", "educational", "rag", "embedding", "rust"]
-categories = ["database", "database-implementations", "command-line-utilities", "machine-learning", "development-tools"]
+categories = ["database", "database-implementations", "command-line-utilities"]
 edition = "2021"
 
 [dependencies]
