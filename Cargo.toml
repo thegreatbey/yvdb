@@ -1,6 +1,6 @@
 [package]
 name = "yvdb"
-version = "0.1.0"
+version = "0.1.1"
 description = "Small educational in-memory vector database with REST API, append-only durability, brute-force search, and adaptive heartbeat feat for RAG hallucination mitigation"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/thegreatbey/yvdb/tree/feature/heartbeat"
