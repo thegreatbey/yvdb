@@ -24,6 +24,7 @@ mod api;
 mod config;
 mod persist;
 mod store;
+mod app_state;
 
 use crate::api::types::ErrorResponse;
 use api::routes::{delete_handler, query_handler, stats_handler, upsert_handler};
@@ -33,7 +34,9 @@ use persist::{
     wal::Wal,
 };
 use store::Store;
-
+use crate::app_state::{AppState, QueryStats}; //added this here so we can use it in the main function for the query_stats field in the AppState struct
+//to resolve query_stats undelcared type query_stats: Arc::new(RwLock::new(QueryStats::default())),
+/*
 #[derive(Clone)]
 pub struct AppState {
     //store shared across handlers
@@ -53,6 +56,9 @@ pub struct QueryStats {
     pub total: usize,
     pub success: usize,
 }
+*/
+
+//use crate::app_state::AppState;
 
 //liveness + simple stats so operators can see retrieval health
 async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {

@@ -12,8 +12,9 @@ use crate::{
         StatsResponse, UpsertRequest, UpsertResponse,
     },
     store::{Metric, Store},
-    AppState,
+//    app_state::AppState
 };
+use crate::app_state::AppState;
 
 //upsert records into a collection; creates the collection if it does not exist
 //span carries collection and batch size so logs show request scale

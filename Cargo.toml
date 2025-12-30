@@ -30,5 +30,8 @@ http-body-util = "0.1"
 # temporary files/directories for isolated WAL paths
 tempfile = "3"
 
+[lib]
+name = "yvdb"
+path = "src/lib.rs"
  
 
