@@ -16,7 +16,6 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        //defaults are small to protect memory on early experiments
         let data_dir = std::env::var("YVDB_DATA_DIR").unwrap_or_else(|_| "data".to_string());
         let max_dimension = env_usize("YVDB_MAX_DIMENSION", 4096);
         let max_batch = env_usize("YVDB_MAX_BATCH", 1024);
@@ -27,7 +26,6 @@ impl Config {
         let request_timeout_ms = env_u64("YVDB_REQUEST_TIMEOUT_MS", 2000);
         let max_request_bytes = env_usize("YVDB_MAX_REQUEST_BYTES", 1_048_576);
         let snapshot_on_shutdown = env_bool("YVDB_SNAPSHOT_ON_SHUTDOWN", false);
-        //allow overriding the listen address for Docker or remote deployment
         let bind_addr =
             std::env::var("YVDB_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
         Self {

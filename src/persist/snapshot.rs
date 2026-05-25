@@ -5,10 +5,25 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use bincode::Options;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::store::{Metric, Store};
+
+//fixed-width ints so bincode round-trips match on read and write
+fn serialize_snap(snap: &Snapshot) -> anyhow::Result<Vec<u8>> {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize(snap)
+        .map_err(Into::into)
+}
+
+fn deserialize_snap(bytes: &[u8]) -> anyhow::Result<Snapshot> {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .deserialize(bytes)
+        .map_err(Into::into)
+}
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
@@ -30,8 +45,9 @@ struct CollectionSnap {
 struct RecordSnap {
     id: String,
     vector: Vec<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    metadata: Option<Value>,
+    //metadata stored as json text so bincode can round-trip without serde_json::Value
+    #[serde(default)]
+    metadata: Option<String>,
 }
 
 pub fn write_snapshot(store: &Store, dir: &Path) -> anyhow::Result<PathBuf> {
@@ -45,7 +61,8 @@ pub fn write_snapshot(store: &Store, dir: &Path) -> anyhow::Result<PathBuf> {
             records.push(RecordSnap {
                 id: r.id,
                 vector: r.vector,
-                metadata: r.metadata,
+                //string form works with bincode; Value would break deserialize
+                metadata: r.metadata.map(|v| v.to_string()),
             });
         }
         collections.push(CollectionSnap {
@@ -62,10 +79,14 @@ pub fn write_snapshot(store: &Store, dir: &Path) -> anyhow::Result<PathBuf> {
     };
     fs::create_dir_all(dir)?;
     let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let path = dir.join(format!("snapshot-{}.json", ts));
+    //.bin + bincode keeps files smaller than json and loads faster on restart
+    let path = dir.join(format!("snapshot-{}.bin", ts));
     let mut f = fs::File::create(&path)?;
-    let json = serde_json::to_vec_pretty(&snap)?;
-    f.write_all(&json)?;
+    //magic bytes let startup reject corrupted or wrong file types before bincode decode
+    let mut data = b"TOON".to_vec();
+    let bin = serialize_snap(&snap)?;
+    data.extend_from_slice(&bin);
+    f.write_all(&data)?;
     f.sync_data()?;
     Ok(path)
 }
@@ -96,10 +117,17 @@ pub fn load_latest_snapshot_into(store: &Store, dir: &Path) -> anyhow::Result<Op
         return Ok(None);
     };
     let bytes = fs::read(&path)?;
-    let snap: Snapshot = serde_json::from_slice(&bytes)?;
+    //first 4 bytes must match TOON so we never feed garbage into bincode
+    if bytes.len() < 4 || &bytes[0..4] != b"TOON" {
+        return Err(anyhow::anyhow!("invalid snapshot magic header"));
+    }
+    let snap: Snapshot = deserialize_snap(&bytes[4..])?;
 
     for col in snap.collections {
-        let metric = Metric::from_str(&col.metric).map_err(|e| anyhow::anyhow!(e))?;
+        let metric = col
+            .metric
+            .parse::<Metric>()
+            .map_err(|e| anyhow::anyhow!(e))?;
         store.ensure_collection(&col.name, col.dimension, metric);
         for r in col.records {
             store.upsert(
@@ -107,7 +135,8 @@ pub fn load_latest_snapshot_into(store: &Store, dir: &Path) -> anyhow::Result<Op
                 crate::api::types::Record {
                     id: r.id,
                     vector: r.vector,
-                    metadata: r.metadata,
+                    //turn stored json text back into Value for the live store
+                    metadata: r.metadata.and_then(|s| serde_json::from_str(&s).ok()),
                 },
             );
         }
@@ -149,8 +178,13 @@ mod tests {
         let store2 = Store::new();
         let loaded = load_latest_snapshot_into(&store2, dir.path()).unwrap();
         assert!(loaded.is_some());
-        let stats = store2.stats("demo").unwrap();
-        assert_eq!(stats.count, 2);
+        let count = store2
+            .list_all_stats()
+            .into_iter()
+            .find(|(n, _)| n == "demo")
+            .map(|(_, s)| s.count)
+            .unwrap_or(0);
+        assert_eq!(count, 2);
     }
 
     #[test]
@@ -158,26 +192,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new();
 
-        //write a minimal old-format snapshot without version
+        //write a minimal binary snapshot with default version (0) and TOON magic
         std::fs::create_dir_all(dir.path()).unwrap();
-        let path = dir.path().join("snapshot-old.json");
-        let old = serde_json::json!({
-            "collections": [
-                {
-                    "name": "demo",
-                    "dimension": 2,
-                    "metric": "cosine",
-                    "records": [
-                        {"id":"a","vector":[1.0,0.0]}
-                    ]
-                }
-            ]
-        });
-        std::fs::write(&path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        let path = dir.path().join("snapshot-old.bin");
+        let snap = Snapshot {
+            version: 0,
+            collections: vec![CollectionSnap {
+                name: "demo".into(),
+                dimension: 2,
+                metric: "cosine".into(),
+                records: vec![RecordSnap {
+                    id: "a".into(),
+                    vector: vec![1.0, 0.0],
+                    metadata: None,
+                }],
+            }],
+        };
+        let mut data = b"TOON".to_vec();
+        data.extend_from_slice(&serialize_snap(&snap).unwrap());
+        std::fs::write(&path, data).unwrap();
 
         let loaded = super::load_latest_snapshot_into(&store, dir.path()).unwrap();
         assert!(loaded.is_some());
-        let stats = store.stats("demo").unwrap();
-        assert_eq!(stats.count, 1);
+        let count = store
+            .list_all_stats()
+            .into_iter()
+            .find(|(n, _)| n == "demo")
+            .map(|(_, s)| s.count)
+            .unwrap_or(0);
+        assert_eq!(count, 1);
     }
 }
