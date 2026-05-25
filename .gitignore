@@ -1,5 +1,6 @@
-# Build output
+#build output (release tree used for isolated clippy runs)
 /target/
+/target-isolated/
 
 # Local data and logs
 /data/

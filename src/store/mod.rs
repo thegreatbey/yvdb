@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::RwLock};
+use std::{collections::HashMap, str::FromStr, sync::RwLock};
 
 use serde_json::Value;
 
@@ -11,15 +11,6 @@ pub enum Metric {
 }
 
 impl Metric {
-    //metric name parsing that is forgiving about case
-    pub fn from_str(s: &str) -> Result<Metric, String> {
-        match s.to_lowercase().as_str() {
-            "cosine" => Ok(Metric::Cosine),
-            "l2" | "euclidean" => Ok(Metric::L2),
-            other => Err(format!("unknown metric: {}", other)),
-        }
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             Metric::Cosine => "cosine",
@@ -28,12 +19,32 @@ impl Metric {
     }
 }
 
+//metric name parsing that is forgiving about case (std::str::FromStr for clippy and idiomatic .parse())
+impl FromStr for Metric {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cosine" => Ok(Metric::Cosine),
+            "l2" | "euclidean" => Ok(Metric::L2),
+            other => Err(format!("unknown metric: {}", other)),
+        }
+    }
+}
+
+//IvfIndex: centroids + bucketed records for fast approximate search
+pub struct IvfIndex {
+    pub centroids: Vec<Vec<f32>>,
+    pub buckets: HashMap<usize, Vec<Record>>,
+}
+
 struct Collection {
     dimension: usize,
     metric: Metric,
     ids: Vec<String>,
     vectors: Vec<Vec<f32>>,
     metadata: Vec<Option<Value>>,
+    ivf: Option<IvfIndex>,
 }
 
 impl Collection {
@@ -44,6 +55,7 @@ impl Collection {
             ids: Vec::new(),
             vectors: Vec::new(),
             metadata: Vec::new(),
+            ivf: None,
         }
     }
 
@@ -52,11 +64,18 @@ impl Collection {
         if let Some(pos) = self.ids.iter().position(|id| id == &rec.id) {
             self.vectors[pos] = rec.vector;
             self.metadata[pos] = rec.metadata;
+            //data changed so old cluster buckets are stale until rebuilt
+            self.ivf = None;
             return;
         }
         self.ids.push(rec.id);
         self.vectors.push(rec.vector);
         self.metadata.push(rec.metadata);
+        self.ivf = None;
+        //after enough vectors, build ivf once so queries scan one bucket not the whole collection
+        if self.vectors.len() > 32 && self.ivf.is_none() {
+            self.ivf = Some(build_ivf(&self.ids, &self.vectors, &self.metadata, 4));
+        }
     }
 
     //remove by id if present; returns true when a record was removed
@@ -65,6 +84,7 @@ impl Collection {
             self.ids.remove(pos);
             self.vectors.remove(pos);
             self.metadata.remove(pos);
+            self.ivf = None;
             return true;
         }
         false
@@ -143,6 +163,41 @@ impl Store {
             .get(name)
             .ok_or_else(|| "collection not found".to_string())?;
 
+        //ivf: nearest centroid picks one bucket so we score fewer vectors than full scan
+        if c.vectors.len() > 32 && c.ivf.is_some() {
+            if let Some(ivf) = &c.ivf {
+                if !ivf.centroids.is_empty() {
+                    let bid = closest_centroid(query, &ivf.centroids);
+                    if let Some(bucket) = ivf.buckets.get(&bid) {
+                        let mut scored: Vec<(usize, f32, Record)> = Vec::new();
+                        for rec in bucket {
+                            let score = match c.metric {
+                                Metric::Cosine => cosine_similarity(query, &rec.vector),
+                                Metric::L2 => -l2_distance(query, &rec.vector),
+                            };
+                            scored.push((0, score, rec.clone()));
+                        }
+                        /*sort by score descending because the higher the score, the more similar the vector is to the query
+                        so we want to get the highest scoring vectors first*/
+                        scored.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let take = k.min(scored.len());
+                        let mut results = Vec::with_capacity(take);
+                        for (_, score, rec) in scored.into_iter().take(take) {
+                            results.push(ScoredPoint {
+                                id: rec.id,
+                                score,
+                                metadata: rec.metadata,
+                            });
+                        }
+                        return Ok(results);
+                    }
+                }
+            }
+        }
+
+        //fallback flat search (also used to build ivf lazily)
         let mut scored: Vec<(usize, f32)> = Vec::with_capacity(c.ids.len());
         for (idx, v) in c.vectors.iter().enumerate() {
             let score = match c.metric {
@@ -171,58 +226,9 @@ impl Store {
                 id: c.ids[idx].clone(),
                 score,
                 metadata: c.metadata[idx].clone(),
-                distance: None,
-                applied_min_score: 0.0,
-                relaxed: false,
             });
         }
         Ok(results)
-    }
-
-    //scores all vectors and returns them sorted by score descending
-    pub fn score_all_sorted(&self, name: &str, query: &[f32]) -> Result<Vec<ScoredPoint>, String> {
-        let guard = self.collections.read().unwrap();
-        let c = guard
-            .get(name)
-            .ok_or_else(|| "collection not found".to_string())?;
-
-        let mut scored: Vec<(usize, f32)> = Vec::with_capacity(c.ids.len());
-        for (idx, v) in c.vectors.iter().enumerate() {
-            let score = match c.metric {
-                Metric::Cosine => cosine_similarity(query, v),
-                Metric::L2 => -l2_distance(query, v),
-            };
-            scored.push((idx, score));
-        }
-
-        scored.sort_by(
-            |a, b| match b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal) {
-                std::cmp::Ordering::Equal => c.ids[a.0].cmp(&c.ids[b.0]),
-                other => other,
-            },
-        );
-
-        let mut results = Vec::with_capacity(scored.len());
-        for (idx, score) in scored.into_iter() {
-            results.push(ScoredPoint {
-                id: c.ids[idx].clone(),
-                score,
-                metadata: c.metadata[idx].clone(),
-                distance: None,
-                applied_min_score: 0.0,
-                relaxed: false,
-            });
-        }
-        Ok(results)
-    }
-
-    pub fn stats(&self, name: &str) -> Option<Stats> {
-        let guard = self.collections.read().unwrap();
-        guard.get(name).map(|c| Stats {
-            count: c.ids.len(),
-            dimension: c.dimension,
-            metric: c.metric.as_str().to_string(),
-        })
     }
 
     //export all collections for snapshotting
@@ -259,6 +265,10 @@ pub struct CollectionExport {
 
 //dot product based similarity that stays simple for the first version
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    //lengths must match or we would panic on b[i]; skip bad rows instead of crashing the server
+    if a.len() != b.len() {
+        return f32::NEG_INFINITY;
+    }
     let mut dot = 0.0f32;
     let mut na = 0.0f32;
     let mut nb = 0.0f32;
@@ -272,12 +282,99 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return f32::MAX;
+    }
     let mut sum = 0.0f32;
     for i in 0..a.len() {
         let d = a[i] - b[i];
         sum += d * d;
     }
     sum.sqrt()
+}
+
+//kmeans builds centroid points; each vector later lands in the bucket of its nearest centroid
+fn kmeans(vectors: &[Vec<f32>], k: usize, iters: usize) -> Vec<Vec<f32>> {
+    if vectors.is_empty() || k == 0 {
+        return vec![];
+    }
+    let dim = vectors[0].len();
+    let mut cents: Vec<Vec<f32>> = (0..k.min(vectors.len()))
+        .map(|i| vectors[i % vectors.len()].clone())
+        .collect();
+    for _ in 0..iters {
+        let mut sums: Vec<Vec<f32>> = vec![vec![0.0; dim]; cents.len()];
+        let mut cnts = vec![0usize; cents.len()];
+        for v in vectors {
+            let mut best = 0;
+            let mut bestd = f32::MAX;
+            for (j, c) in cents.iter().enumerate() {
+                let d = l2_distance(v, c);
+                if d < bestd {
+                    bestd = d;
+                    best = j;
+                }
+            }
+            for d in 0..dim {
+                sums[best][d] += v[d];
+            }
+            cnts[best] += 1;
+        }
+        for j in 0..cents.len() {
+            if cnts[j] > 0 {
+                for d in 0..dim {
+                    cents[j][d] = sums[j][d] / cnts[j] as f32;
+                }
+            }
+        }
+    }
+    cents
+}
+
+//pack records into buckets keyed by centroid index for fast query routing
+fn build_ivf(
+    ids: &[String],
+    vectors: &[Vec<f32>],
+    metadata: &[Option<Value>],
+    k: usize,
+) -> IvfIndex {
+    let cents = kmeans(vectors, k, 5);
+    let mut buckets: HashMap<usize, Vec<Record>> = HashMap::new();
+    for (i, v) in vectors.iter().enumerate() {
+        let mut best = 0usize;
+        let mut bestd = f32::MAX;
+        for (j, c) in cents.iter().enumerate() {
+            let d = l2_distance(v, c);
+            if d < bestd {
+                bestd = d;
+                best = j;
+            }
+        }
+        let rec = Record {
+            id: ids[i].clone(),
+            vector: v.clone(),
+            metadata: metadata[i].clone(),
+        };
+        buckets.entry(best).or_default().push(rec);
+    }
+    IvfIndex {
+        centroids: cents,
+        buckets,
+    }
+}
+
+//find closest centroid index
+fn closest_centroid(query: &[f32], cents: &[Vec<f32>]) -> usize {
+    let mut best = 0;
+    let mut bestd = f32::MAX;
+    for (j, c) in cents.iter().enumerate() {
+        let d = l2_distance(query, c);
+        if d < bestd {
+            bestd = d;
+            best = j;
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -356,16 +453,26 @@ mod tests {
                 metadata: None,
             },
         );
-        let stats = store.stats("demo").unwrap();
-        assert_eq!(stats.count, 1);
+        let count = store
+            .list_all_stats()
+            .into_iter()
+            .find(|(n, _)| n == "demo")
+            .map(|(_, s)| s.count)
+            .unwrap_or(0);
+        assert_eq!(count, 1);
 
         let first = store.delete("demo", "a");
         assert!(first);
         let second = store.delete("demo", "a");
         assert!(!second);
 
-        let stats2 = store.stats("demo").unwrap();
-        assert_eq!(stats2.count, 0);
+        let count2 = store
+            .list_all_stats()
+            .into_iter()
+            .find(|(n, _)| n == "demo")
+            .map(|(_, s)| s.count)
+            .unwrap_or(0);
+        assert_eq!(count2, 0);
     }
 
     #[test]

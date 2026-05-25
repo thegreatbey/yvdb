@@ -25,12 +25,6 @@ enum WalEvent<'a> {
         collection: &'a str,
         record: &'a Record,
     },
-    #[serde(rename = "delete")]
-    Delete {
-        version: u32,
-        collection: &'a str,
-        id: &'a str,
-    },
 }
 
 #[derive(Deserialize)]
@@ -88,23 +82,6 @@ impl Wal {
             version: 1,
             collection,
             record,
-        };
-        let json = serde_json::to_string(&evt)?;
-        self.maybe_rotate((json.len() + 1) as u64)?;
-        let mut f = self.file.lock().unwrap();
-        f.write_all(json.as_bytes())?;
-        f.write_all(b"\n")?;
-        f.flush()?;
-        f.sync_data()?;
-        Ok(())
-    }
-
-    //append a delete event so recovery removes the record as well
-    pub fn append_delete(&self, collection: &str, id: &str) -> anyhow::Result<()> {
-        let evt = WalEvent::Delete {
-            version: 1,
-            collection,
-            id,
         };
         let json = serde_json::to_string(&evt)?;
         self.maybe_rotate((json.len() + 1) as u64)?;
@@ -255,8 +232,13 @@ mod tests {
         let store = Store::new();
         wal.replay_into(&store).unwrap();
 
-        let stats = store.stats("demo").unwrap();
-        assert_eq!(stats.count, 2);
+        let count = store
+            .list_all_stats()
+            .into_iter()
+            .find(|(n, _)| n == "demo")
+            .map(|(_, s)| s.count)
+            .unwrap_or(0);
+        assert_eq!(count, 2);
 
         //query should return at least one of the ids depending on metric default
         let res = store.top_k("demo", &[1.0, 0.0], 1).unwrap();
@@ -267,20 +249,38 @@ mod tests {
     #[test]
     fn wal_delete_replay_removes_record() {
         let tmp = NamedTempFile::new().unwrap();
-        let wal = Wal::open(tmp.path()).unwrap();
+        let path = tmp.path().to_path_buf();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let up = serde_json::json!({
+            "type": "upsert",
+            "version": 1,
+            "collection": "demo",
+            "record": {"id":"id1","vector":[1.0,0.0]}
+        });
+        let del = serde_json::json!({
+            "type": "delete",
+            "version": 1,
+            "collection": "demo",
+            "id": "id1"
+        });
+        writeln!(&mut f, "{}", up).unwrap();
+        writeln!(&mut f, "{}", del).unwrap();
 
-        let r1 = Record {
-            id: "id1".into(),
-            vector: vec![1.0, 0.0],
-            metadata: None,
-        };
-        wal.append_upsert("demo", &r1).unwrap();
-        wal.append_delete("demo", "id1").unwrap();
-
+        let wal = Wal::open(&path).unwrap();
         let store = Store::new();
         wal.replay_into(&store).unwrap();
-        let stats = store.stats("demo").unwrap();
-        assert_eq!(stats.count, 0);
+        let count = store
+            .list_all_stats()
+            .into_iter()
+            .find(|(n, _)| n == "demo")
+            .map(|(_, s)| s.count)
+            .unwrap_or(0);
+        assert_eq!(count, 0);
     }
 
     #[test]
@@ -311,8 +311,13 @@ mod tests {
         let wal = Wal::open(&path).unwrap();
         let store = Store::new();
         wal.replay_into(&store).unwrap();
-        let stats = store.stats("demo").unwrap();
-        assert_eq!(stats.count, 0);
+        let count = store
+            .list_all_stats()
+            .into_iter()
+            .find(|(n, _)| n == "demo")
+            .map(|(_, s)| s.count)
+            .unwrap_or(0);
+        assert_eq!(count, 0);
     }
 
     #[test]
@@ -336,8 +341,13 @@ mod tests {
         //now replay into a fresh store; it should read all segments
         let store = Store::new();
         wal.replay_into(&store).unwrap();
-        let stats = store.stats("demo").unwrap();
-        assert!(stats.count >= 1);
+        let count = store
+            .list_all_stats()
+            .into_iter()
+            .find(|(n, _)| n == "demo")
+            .map(|(_, s)| s.count)
+            .unwrap_or(0);
+        assert!(count >= 1);
 
         //ensure both active and rotated files exist
         let files = wal.enumerate_wal_files().unwrap();

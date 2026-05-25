@@ -1,7 +1,7 @@
 use std::{
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -12,7 +12,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     middleware,
     response::Response,
-    routing::{delete, get, head, post},
+    routing::{get, head, post},
     Json, Router,
 };
 use tower::timeout::TimeoutLayer;
@@ -21,64 +21,40 @@ use tower::ServiceBuilder;
 use tracing_subscriber::{fmt, EnvFilter};
 
 mod api;
+mod app_state;
 mod config;
 mod persist;
 mod store;
-mod app_state;
 
 use crate::api::types::ErrorResponse;
-use api::routes::{delete_handler, query_handler, stats_handler, upsert_handler};
+use crate::app_state::AppState;
+use api::routes::{create_collection_handler, insert_vectors_handler, query_vectors_handler};
 use config::Config;
 use persist::{
     snapshot::{load_latest_snapshot_into, write_snapshot},
     wal::Wal,
 };
 use store::Store;
-use crate::app_state::{AppState, QueryStats}; //added this here so we can use it in the main function for the query_stats field in the AppState struct
-//to resolve query_stats undelcared type query_stats: Arc::new(RwLock::new(QueryStats::default())),
-/*
-#[derive(Clone)]
-pub struct AppState {
-    //store shared across handlers
-    pub store: Arc<Store>,
-    //wal writer for durability
-    pub wal: Arc<Wal>,
-    //config to control limits
-    pub config: Arc<Config>,
-    //counters for query outcomes to surface success rate
-    pub query_stats: Arc<RwLock<QueryStats>>,
-    //server start time to report uptime in health checks
-    pub start_time: Instant,
-}
 
-#[derive(Default, Clone)]
-pub struct QueryStats {
-    pub total: usize,
-    pub success: usize,
-}
-*/
-
-//use crate::app_state::AppState;
-
-//liveness + simple stats so operators can see retrieval health
+//liveness probe for operators and load balancers
 async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let stats = state.query_stats.read().unwrap().clone();
-    let uptime_secs = state.start_time.elapsed().as_secs();
-    let success_rate = if stats.total == 0 {
-        0.0
-    } else {
-        stats.success as f64 / stats.total as f64
-    };
+    let collections: Vec<serde_json::Value> = state
+        .store
+        .list_all_stats()
+        .into_iter()
+        .map(|(name, stats)| {
+            serde_json::json!({
+                "name": name,
+                "count": stats.count,
+                "dimension": stats.dimension,
+                "metric": stats.metric,
+            })
+        })
+        .collect();
     Json(serde_json::json!({
         "status": "ok",
-        "uptime_secs": uptime_secs,
-        "query_stats": {
-            "total": stats.total,
-            "success": stats.success,
-            "success_rate": success_rate
-        },
-        "current_relax_cutoff": state.config.relax_floor,
-        "default_min_score": state.config.default_min_score
+        "uptime_secs": state.start_time.elapsed().as_secs(),
+        "collections": collections,
     }))
 }
 
@@ -103,9 +79,11 @@ async fn index() -> Json<serde_json::Value> {
         "endpoints": {
             "health": "/healthz",
             "version": "/version",
-            "upsert": "/collections/:name/upsert",
-            "query": "/collections/:name/query",
-            "stats": "/collections/:name/stats"
+            //three flat routes replaced the old /collections/:name/* nested paths
+            //better than upsert, query, stats routes
+            "create_collection": "/collection/create",
+            "insert_vectors": "/vectors/insert",
+            "query_vectors": "/vectors/query"
         }
     }))
 }
@@ -166,18 +144,15 @@ async fn main() -> anyhow::Result<()> {
         store,
         wal,
         config,
-        query_stats: Arc::new(RwLock::new(QueryStats::default())),
         start_time: Instant::now(),
     };
+    //unified api: create namespace, insert vectors, query with TOON text response
     let app = Router::new()
-        .route("/collections/:name/upsert", post(upsert_handler))
-        .route("/collections/:name/query", post(query_handler))
-        .route("/collections/:name/stats", get(stats_handler))
-        //list all collections for discovery
-        .route("/collections", get(api::routes::collections_handler))
+        .route("/collection/create", post(create_collection_handler))
+        .route("/vectors/insert", post(insert_vectors_handler))
+        .route("/vectors/query", post(query_vectors_handler))
         //discovery-friendly index
         .route("/", get(index))
-        .route("/collections/:name/records/:id", delete(delete_handler))
         //health check endpoint for quick "are you up?" probes
         .route("/healthz", get(healthz))
         //head variant for health probes that do not need a body
@@ -355,53 +330,63 @@ mod integration_tests {
             max_request_bytes: 1_048_576,
             snapshot_on_shutdown: false,
             bind_addr: "127.0.0.1:8080".to_string(),
-            default_min_score: 0.0,
-            relax_floor: 0.5,
-            relax_delta: 0.2,
         });
 
         let state = AppState {
             store,
             wal,
             config,
-            query_stats: Arc::new(std::sync::RwLock::new(QueryStats::default())),
             start_time: std::time::Instant::now(),
         };
         let app = Router::new()
-            .route("/collections/:name/upsert", post(upsert_handler))
-            .route("/collections/:name/query", post(query_handler))
-            .route("/collections/:name/stats", get(stats_handler))
+            .route("/collection/create", post(create_collection_handler))
+            .route("/vectors/insert", post(insert_vectors_handler))
+            .route("/vectors/query", post(query_vectors_handler))
             .with_state(state);
 
-        //create collection and upsert two points
-        let upsert_body = serde_json::json!({
-            "records": [
-                {"id": "a", "vector": [1.0, 0.0]},
-                {"id": "b", "vector": [0.0, 1.0]}
-            ],
+        let create_body = serde_json::json!({
+            "name": "demo",
             "dimension": 2,
             "metric": "cosine"
         })
         .to_string();
-
-        let req = Request::post("/collections/demo/upsert")
+        let req = Request::post("/collection/create")
             .header("content-type", "application/json")
-            .body(Body::from(upsert_body))
+            .body(Body::from(create_body))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        //query top-1 near [1,0]
-        let query_body = serde_json::json!({"vector": [1.0, 0.0], "k": 1}).to_string();
-        let req = Request::post("/collections/demo/query")
+        let insert_body = serde_json::json!({
+            "collection": "demo",
+            "records": [
+                {"id": "a", "vector": [1.0, 0.0]},
+                {"id": "b", "vector": [0.0, 1.0]}
+            ]
+        })
+        .to_string();
+        let req = Request::post("/vectors/insert")
+            .header("content-type", "application/json")
+            .body(Body::from(insert_body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let query_body = serde_json::json!({
+            "collection": "demo",
+            "vector": [1.0, 0.0],
+            "k": 1
+        })
+        .to_string();
+        let req = Request::post("/vectors/query")
             .header("content-type", "application/json")
             .body(Body::from(query_body))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let parsed: crate::api::types::QueryResponse = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(parsed.results.len(), 1);
-        assert_eq!(parsed.results[0].id, "a");
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("a"));
+        assert!(text.starts_with("[yvdb_query_results]"));
     }
 }

@@ -1,11 +1,11 @@
 [package]
 name = "yvdb"
-version = "0.1.1"
-description = "Small educational in-memory vector database with REST API, append-only durability, brute-force search, and adaptive heartbeat feat for RAG hallucination mitigation"
+version = "0.1.2"
+description = "Educational in-memory vector DB: WAL + bincode snapshots (TOON header), IVF bucket search, Axum REST API, TOON query responses"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/thegreatbey/yvdb/tree/feature/heartbeat"
+repository = "https://github.com/thegreatbey/yvdb"
 readme = "README.md"
-keywords = ["vector-database", "educational", "rag", "embedding", "rust"]
+keywords = ["vector-database", "educational", "rag", "embedding", "rust", "ivf", "toon"]
 categories = ["database", "database-implementations", "command-line-utilities"]
 edition = "2021"
 
@@ -14,6 +14,8 @@ axum = { version = "0.7", features = ["macros", "http1", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+#bincode: compact binary snapshots (used with TOON magic header in persist/snapshot.rs)
+bincode = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
@@ -33,5 +35,7 @@ tempfile = "3"
 [lib]
 name = "yvdb"
 path = "src/lib.rs"
- 
+
+[workspace]
+ #breaks current link with parent dir
 
