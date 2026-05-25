@@ -5,7 +5,7 @@ description = "Educational in-memory vector DB: WAL + bincode snapshots (TOON he
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/thegreatbey/yvdb"
 readme = "README.md"
-keywords = ["vector-database", "educational", "rag", "embedding", "rust", "ivf", "toon"]
+keywords = ["vector-database", "TOON", "rag", "embedding", "ivf"]
 categories = ["database", "database-implementations", "command-line-utilities"]
 edition = "2021"
 
