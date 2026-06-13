@@ -1,13 +1,17 @@
 [package]
 name = "yvdb"
-version = "0.1.2"
+version = "0.1.4"
 description = "Educational in-memory vector DB: WAL + bincode snapshots (TOON header), IVF bucket search, Axum REST API, TOON query responses"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/thegreatbey/yvdb"
+documentation = "https://docs.rs/yvdb"
 readme = "README.md"
 keywords = ["vector-database", "TOON", "rag", "embedding", "ivf"]
 categories = ["database", "database-implementations", "command-line-utilities"]
 edition = "2021"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 axum = { version = "0.7", features = ["macros", "http1", "tokio"] }

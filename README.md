@@ -308,7 +308,7 @@ item_abc, 1.000, {"category":"sports"}
 |------|----------|
 | `GET /` | JSON map of endpoint paths |
 | `GET /healthz` | `{"status":"ok","uptime_secs":...,"collections":[...]}` |
-| `GET /version` | `{"name":"yvdb","version":"0.1.2"}` |
+| `GET /version` | `{"name":"yvdb","version":"0.1.4"}` |
 
 PowerShell:
 
